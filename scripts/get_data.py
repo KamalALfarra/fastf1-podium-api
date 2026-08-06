@@ -273,10 +273,12 @@ import pandas as pd
 from datetime import datetime
 
 
+# Assuming RAW_FOLDER is defined earlier in your script, e.g., RAW_FOLDER = Path("data")
+
 def fetch_ml_standings_data(start_year, end_year, filename="driver_ml_features.csv"):
     """
     Downloads driver standings per round alongside pre-race career features (age, experience, wins, podiums)
-    without hitting API rate limits.
+    and includes strictly PRE-RACE constructor/driver standings and grid positions to prevent ML data leakage.
     """
     if (RAW_FOLDER / filename).exists():
         print(f"{filename} already exists. Skipping.")
@@ -313,13 +315,12 @@ def fetch_ml_standings_data(start_year, end_year, filename="driver_ml_features.c
         time.sleep(0.3)
 
     # --- Step 2: Build In-Memory Career History (1950 to end_year) ---
-    # We load all race results once. This completely eliminates the 429 rate limit error.
-    print(f"Step 2/4: Building career history from 1950 to {end_year} to track past wins/podiums...")
+    print(f"Step 2/4: Building career history from 1990 to {end_year} to track past wins/podiums and grid positions...")
     driver_history = {}
     driver_debut = {}
     race_dates = {}
 
-    for y in range(1950, end_year + 1):
+    for y in range(1990, end_year + 1):
         data = get_json(f"{BASE_URL}/{y}/results.json?limit=1000")
         if not data: continue
         races = data.get("MRData", {}).get("RaceTable", {}).get("Races", [])
@@ -331,6 +332,9 @@ def fetch_ml_standings_data(start_year, end_year, filename="driver_ml_features.c
                 d_id = res.get("Driver", {}).get("driverId")
                 pos = res.get("position")
 
+                # Capture grid position right before the race
+                grid_pos = res.get("grid", "0")
+
                 if d_id not in driver_debut:
                     driver_debut[d_id] = y
                 if d_id not in driver_history:
@@ -340,21 +344,50 @@ def fetch_ml_standings_data(start_year, end_year, filename="driver_ml_features.c
                     "year": y,
                     "round": rnd,
                     "is_win": 1 if pos == "1" else 0,
-                    "is_podium": 1 if pos in ["1", "2", "3"] else 0
+                    "is_podium": 1 if pos in ["1", "2", "3"] else 0,
+                    "grid": int(grid_pos) if grid_pos.isdigit() else 0
                 })
-        time.sleep(0.3)  # Small delay to respect API limits
+        time.sleep(0.3)
 
-    # --- Step 3: Fetch Standings for Target ML Years and Combine ---
-    print(f"Step 3/4: Fetching per-race standings and calculating pre-race features ({start_year}-{end_year})...")
+        # --- Step 3: Fetch Standings for Target ML Years and Combine ---
+    print(f"Step 3/4: Fetching PRE-RACE standings and calculating features ({start_year}-{end_year})...")
     ml_rows = []
 
     for y in range(start_year, end_year + 1):
-        # Determine how many rounds are in the current year
         rounds_this_year = [k[1] for k in race_dates.keys() if k[0] == y]
         if not rounds_this_year: continue
         max_round = max(rounds_this_year)
 
         for rnd in range(1, max_round + 1):
+
+            # 1. Fetch PREVIOUS round standings to prevent data leakage (rnd - 1)
+            prev_constructor_standings = {}
+            prev_driver_standings = {}
+            prev_driver_points = {}
+
+            if rnd > 1:
+                # Constructor Standings Before Race
+                c_data_prev = get_json(f"{BASE_URL}/{y}/{rnd - 1}/constructorstandings.json")
+                if c_data_prev:
+                    c_lists = c_data_prev.get("MRData", {}).get("StandingsTable", {}).get("StandingsLists", [])
+                    if c_lists:
+                        for c_item in c_lists[0].get("ConstructorStandings", []):
+                            c_id = c_item.get("Constructor", {}).get("constructorId")
+                            if c_id:
+                                prev_constructor_standings[c_id] = int(c_item.get("position", 0))
+
+                # Driver Standings Before Race
+                d_data_prev = get_json(f"{BASE_URL}/{y}/{rnd - 1}/driverstandings.json")
+                if d_data_prev:
+                    d_lists = d_data_prev.get("MRData", {}).get("StandingsTable", {}).get("StandingsLists", [])
+                    if d_lists:
+                        for d_item in d_lists[0].get("DriverStandings", []):
+                            d_id_prev = d_item.get("Driver", {}).get("driverId")
+                            if d_id_prev:
+                                prev_driver_standings[d_id_prev] = int(d_item.get("position", 0))
+                                prev_driver_points[d_id_prev] = float(d_item.get("points", 0))
+
+            # 2. Fetch current round JUST to get the list of drivers participating
             data = get_json(f"{BASE_URL}/{y}/{rnd}/driverstandings.json")
             if not data: continue
 
@@ -367,6 +400,20 @@ def fetch_ml_standings_data(start_year, end_year, filename="driver_ml_features.c
             for item in drivers:
                 driver_info = item.get("Driver", {})
                 d_id = driver_info.get("driverId")
+
+                # Extract Constructor Info and map to PRE-RACE standing
+                constructors_list = item.get("Constructors", [])
+                c_name = ""
+                c_standing_before_race = 0
+                if constructors_list:
+                    c_info = constructors_list[0]
+                    c_name = c_info.get("name", "")
+                    c_id = c_info.get("constructorId")
+                    c_standing_before_race = prev_constructor_standings.get(c_id, 0)
+
+                # Map Driver to PRE-RACE standing
+                d_standing_before_race = prev_driver_standings.get(d_id, 0)
+                d_points_before_race = prev_driver_points.get(d_id, 0.0)
 
                 # Feature: Exact Age at the time of the race
                 age = None
@@ -382,22 +429,28 @@ def fetch_ml_standings_data(start_year, end_year, filename="driver_ml_features.c
                 # Feature: Years of Experience up to this year
                 experience = y - driver_debut.get(d_id, y)
 
-                # Features: Wins & Podiums (STRICTLY BEFORE this round to prevent ML data leakage)
+                # Features: Wins, Podiums (Strictly Before) & Current Grid Position
                 wins_before = 0
                 podiums_before = 0
+                grid_position = None
+
                 for hist in driver_history.get(d_id, []):
-                    # Only tally results if they happened in a previous year OR an earlier round this year
                     if hist["year"] < y or (hist["year"] == y and hist["round"] < rnd):
                         wins_before += hist["is_win"]
                         podiums_before += hist["is_podium"]
+                    elif hist["year"] == y and hist["round"] == rnd:
+                        grid_position = hist["grid"]
 
                 # Compile the unified row
                 ml_rows.append({
                     "season": y,
                     "round": rnd,
                     "driver_name": f"{driver_info.get('givenName', '')} {driver_info.get('familyName', '')}".strip(),
-                    "championship_standing": int(item.get("position", 0)),
-                    "championship_points": float(item.get("points", 0)),
+                    "constructor_name": c_name,
+                    "constructor_championship_standing": c_standing_before_race,
+                    "championship_standing": d_standing_before_race,
+                    "championship_points": d_points_before_race,
+                    "grid_position": grid_position,
                     "age_at_race": age,
                     "years_of_experience": experience,
                     "career_wins_before_race": wins_before,
@@ -413,7 +466,6 @@ def fetch_ml_standings_data(start_year, end_year, filename="driver_ml_features.c
     df.to_csv(path, index=False)
 
     print("Done! Data is fully processed for Machine Learning.")
-
 
 # To run it in your script (adjust the years to whatever you need):
 # fetch_ml_standings_data(start_year=2010, end_year=2023)
