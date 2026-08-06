@@ -120,65 +120,62 @@ def download_results():
         print(f"{filename} already exists. Skipping.")
         return
 
-
     rows = []
 
     for year in range(START_YEAR, END_YEAR + 1):
 
         print(f"Downloading results {year}")
 
-        url = f"{BASE_URL}/{year}/results/3.json"
+        for podium_position in [1, 2, 3]:
 
-        data = get_json(url)
+            url = f"{BASE_URL}/{year}/results/{podium_position}.json"
 
-        if not data:
-            continue
+            data = get_json(url)
 
+            if not data:
+                continue
 
-        races = (
-            data["MRData"]
-            ["RaceTable"]
-            ["Races"]
-        )
+            races = (
+                data["MRData"]
+                ["RaceTable"]
+                ["Races"]
+            )
 
+            for race in races:
 
-        for race in races:
+                race_name = race["raceName"]
 
-            race_name = race["raceName"]
+                results = race["Results"]
 
-            results = race["Results"]
+                for result in results:
 
+                    rows.append({
 
-            for result in results:
+                        "season": year,
+                        "round": race["round"],
+                        "raceName": race_name,
 
-                rows.append({
+                        "driverId":
+                        result["Driver"]["driverId"],
 
-                    "season": year,
-                    "round": race["round"],
-                    "raceName": race_name,
+                        "driver":
+                        result["Driver"]["givenName"]
+                        + " "
+                        +
+                        result["Driver"]["familyName"],
 
-                    "driverId":
-                    result["Driver"]["driverId"],
+                        "constructor":
+                        result["Constructor"]["name"],
 
-                    "driver":
-                    result["Driver"]["givenName"]
-                    + " "
-                    +
-                    result["Driver"]["familyName"],
+                        "position":
+                        result["position"],
 
-                    "constructor":
-                    result["Constructor"]["name"],
+                        "points":
+                        result["points"]
 
-                    "position":
-                    result["position"],
+                    })
 
-                    "points":
-                    result["points"]
-
-                })
-
-        time.sleep(0.2)
-
+            time.sleep(0.2)
 
     save_csv(rows, filename)
 
@@ -400,8 +397,41 @@ def fetch_ml_standings_data(start_year, end_year, filename="driver_ml_features.c
 # To run it in your script (adjust the years to whatever you need):
 # fetch_ml_standings_data(start_year=2010, end_year=2023)
 # ==========================
-# Constructor Standings
+# Merge Tables
 # ==========================
+def make_Final_table():
+    # 1. Load the CSV files into DataFrames
+    if (ROOT / "data" / "processed" / "final_features.csv").exists():
+        print("data/processed/final_features.csv already exists. Skipping.")
+        return
+    # Replace 'all_drivers.csv' and 'podiums.csv' with your actual file paths
+    df_all = pd.read_csv(ROOT / "data/raw/driver_ml_features.csv")
+    df_podiums = pd.read_csv(ROOT / 'data/raw/race_results.csv')
+
+    # 2. Rename 'driver' to 'driver_name' in the podiums DataFrame so the columns match
+    df_podiums = df_podiums.rename(columns={'driver': 'driver_name'})
+
+    # 3. Create our boolean indicator column in the podiums DataFrame
+    df_podiums['got_podium'] = True
+
+    # 4. Isolate only the columns we need for the merge so we don't duplicate other data
+    # (like constructor names or points which exist in both tables)
+    podium_keys = df_podiums[['season', 'round', 'driver_name', 'got_podium']]
+
+    # 5. Perform a left join
+    # This keeps everything in df_all and adds the 'got_podium' value where it finds a match
+    df_merged = pd.merge(df_all, podium_keys, on=['season', 'round', 'driver_name'], how='left')
+
+    # 6. Fill the NaN values with False for drivers who did not get a podium
+    df_merged['got_podium'] = df_merged['got_podium'].fillna(False)
+
+    # 7. Save the updated table to a new CSV file
+    path = ROOT / "data" / "processed" / "final_features.csv"
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    df_merged.to_csv(path, index=False)
+    print("File successfully saved as 'final_features.cvs'")
 
 # ==========================
 # Main
@@ -418,6 +448,6 @@ if __name__ == "__main__":
     download_results()
 
     fetch_ml_standings_data(start_year=START_YEAR,end_year=END_YEAR)
-
+    make_Final_table()
     print("\nFinished.")
 

@@ -1,3 +1,6 @@
 /data/historical_race_results.csv
 /.idea
 /data/
+/f1_database_csvs
+test.py
+testing data.ipynb
