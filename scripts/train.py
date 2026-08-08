@@ -41,7 +41,8 @@ except Exception as e:
 # 4. Data & Training
 ROOT = Path(__file__).resolve().parent.parent
 df =pd.read_csv(ROOT / "data" / "processed" /"final_features.csv")
-df = df.isnull()==0
+df["grid_position_missing"] = df["grid_position"].isna().astype(int)
+df["grid_position"] = df["grid_position"].fillna(24)
 note, estimator = RECIPES[args.version]
 y = df['got_podium']
 X = df.drop(columns=['got_podium', 'constructor_name','driver_name'])
