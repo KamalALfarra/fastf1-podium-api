@@ -6,6 +6,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+from xgboost import XGBClassifier
 import os
 import pandas as pd
 
@@ -14,10 +15,12 @@ from sklearn.metrics import classification_report, precision_score, recall_score
 
 # 1. Setup Recipes
 RECIPES = {
-    "1.0.0": ("RandomForest, 100 trees, untuned",
-              RandomForestClassifier(n_estimators=100, random_state=42,class_weight={False: 1, True: 30})),
-    "1.1.0": ("LogisticRegression, better-calibrated probabilities",
-              LogisticRegression(max_iter=500, random_state=42,class_weight={False: 1, True: 10})),
+    "1.0.0": ("RandomForest, 500 trees, tuned",
+              RandomForestClassifier(n_estimators=500, random_state=42,class_weight={False: 1, True: 20})),
+    "1.1.0": ("LogisticRegression with class_weight={False: 1, True: 20}, max_iter=600 and set threshold to 0.9",
+              LogisticRegression(max_iter=600, random_state=42,class_weight={False: 1, True: 20})),
+    "1.2.0": ("XGBoost with scale_pos_weight=6 and set threshold to 0.7 eval_metric = aucpr,n_estimators=600,max_depth=2",
+              XGBClassifier(n_estimators=600,learning_rate=0.05,max_depth=2, random_state=42,scale_pos_weight=6,eval_metric="aucpr")),
 }
 
 # 2. Parse Arguments
@@ -54,8 +57,10 @@ Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.2, stratify=y, random_st
 pipe = Pipeline([("scaler", StandardScaler()), ("clf", estimator)]).fit(Xtr, ytr)
 
 # Generate predictions to calculate metrics
-preds = pipe.predict(Xte)
+probs = pipe.predict_proba(Xte)[:, 1]
 
+# Lower decision threshold from 0.50 to 0.30
+preds = probs >= 0.9
 # Print the classification report to your terminal
 print(f"\n--- Classification Report for v{args.version} ---")
 print(classification_report(yte, preds))
@@ -101,7 +106,7 @@ if experiment:
 
     # Log a visual confusion matrix directly to Comet!
     experiment.log_confusion_matrix(y_true=yte, y_predicted=preds)
-    experiment.set_name("RandomForest with class_weight={False: 1, True: 30}")
+    experiment.set_name(note)
 
     experiment.log_model(f"f1-model-v{args.version}", str(model_path))
     experiment.end()
