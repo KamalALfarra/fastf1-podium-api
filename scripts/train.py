@@ -52,24 +52,100 @@ df["grid_position"] = df["grid_position"].fillna(24)
 note, estimator = RECIPES[args.version]
 y = df['got_podium']
 X = df.drop(columns=['got_podium', 'constructor_name', 'driver_name'])
-Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
 
+train_mask = df["season"] <= 2021
+val_mask = df["season"].isin([2022, 2023])
+test_mask = df["season"] == 2024
+
+Xtr = X[train_mask]
+ytr = y[train_mask]
+
+Xval = X[val_mask]
+yval = y[val_mask]
+
+Xte = X[test_mask]
+yte = y[test_mask]
+
+print(f"Training rows:   {len(Xtr)}")
+print(f"Validation rows: {len(Xval)}")
+print(f"Test rows:       {len(Xte)}")
+
+print(f"Training races:   {df.loc[train_mask, ['season','round']].drop_duplicates().shape[0]}")
+print(f"Validation races: {df.loc[val_mask, ['season','round']].drop_duplicates().shape[0]}")
+print(f"Test races:       {df.loc[test_mask, ['season','round']].drop_duplicates().shape[0]}")
 pipe = Pipeline([("scaler", StandardScaler()), ("clf", estimator)]).fit(Xtr, ytr)
 
 # Generate predictions to calculate metrics
 probs = pipe.predict_proba(Xte)[:, 1]
+# Create evaluation dataframe
+results = df.loc[Xte.index, ['season','round', 'driver_name', 'got_podium']].copy()
+results['podium_probability'] = probs
+# Rank drivers within each race
+results['rank'] = (
+    results
+    .groupby(['season', 'round'])['podium_probability']
+    .rank(method='first', ascending=False)
+)
 
-# Lower decision threshold from 0.50 to 0.30
-preds = probs >= 0.9
+# Predict top 3 drivers for each race
+results['predicted_podium'] = results['rank'] <= 3
+
+# How many actual podium drivers were in our predicted top 3?
+correct_podiums = (
+    results[
+        results['predicted_podium'] & results['got_podium']
+    ]
+    .groupby(['season', 'round'])
+    .size()
+)
+# Average number of correct podium predictions per race
+average_correct = correct_podiums.mean()
+
+# Percentage of actual podium spots correctly predicted
+podium_recall_at_3 = (
+    results['predicted_podium'] & results['got_podium']
+).sum() / results['got_podium'].sum()
+
+print("\n--- Top 3 Podium Prediction ---")
+print(f"Average correct podium drivers per race: {average_correct:.2f}")
+print(f"Podium Recall@3: {podium_recall_at_3:.2%}")
+
+# not using it for now
+#preds = probs >= 0.9
 # Print the classification report to your terminal
-print(f"\n--- Classification Report for v{args.version} ---")
-print(classification_report(yte, preds))
+# Create evaluation dataframe
+results = df.loc[Xte.index, ['season', 'round', 'driver_name', 'got_podium']].copy()
 
-# NEW: Calculate individual metrics (using 'weighted' to handle potential class imbalances)
-test_precision = precision_score(yte, preds, pos_label=True, zero_division=0)
-test_recall = recall_score(yte, preds, pos_label=True, zero_division=0)
-test_f1 = f1_score(yte, preds, pos_label=True, zero_division=0)
+results['podium_probability'] = probs
 
+# Rank drivers within each race
+results['rank'] = (
+    results
+    .groupby(['season', 'round'])['podium_probability']
+    .rank(method='first', ascending=False)
+)
+
+# Top 3 drivers are our predicted podium
+results['predicted_podium'] = results['rank'] <= 3
+
+# Number of correct podium predictions
+correct_predictions = (
+    results['predicted_podium'] & results['got_podium']
+).sum()
+
+# Number of races in test set
+number_of_races = results.groupby(['season', 'round']).ngroups
+
+# Average correct podium drivers per race
+average_correct = correct_predictions / number_of_races
+
+# Recall@3
+total_actual_podiums = results['got_podium'].sum()
+recall_at_3 = correct_predictions / total_actual_podiums
+
+print(f"\n--- Top 3 Podium Prediction for v{args.version} ---")
+print(f"Average correct podiums per race: {average_correct:.2f} / 3")
+print(f"Recall@3: {recall_at_3:.2%}")
 
 # 5. Save Locally
 out = Path("models") / f"v{args.version}"
@@ -83,12 +159,19 @@ meta = {
     "description": note,
     "algorithm": type(estimator).__name__,
     "features": list(X.columns),
-    "test_accuracy": round(float(pipe.score(Xte, yte)), 4),
-    "test_precision": round(float(test_precision), 4),
-    "test_recall": round(float(test_recall), 4),
-    "test_f1": round(float(test_f1), 4),
-    "cv_accuracy": round(float(cross_val_score(pipe, Xtr, ytr, cv=5).mean()), 4),
+
+    "test_average_correct_podiums": round(
+        float(average_correct), 4
+    ),
+
+    "test_recall_at_3": round(
+        float(recall_at_3), 4
+    ),
+
+    "test_races": int(number_of_races),
+    "test_rows": int(len(Xte)),
 }
+
 (out / "meta.json").write_text(json.dumps(meta, indent=2))
 
 # 6. Log to Comet
@@ -96,20 +179,22 @@ if experiment:
     experiment.log_parameters(meta)
 
     # UPDATED: Log the expanded dictionary of metrics
-    experiment.log_metrics({
-        "test_acc": meta["test_accuracy"],
-        "cv_acc": meta["cv_accuracy"],
-        "test_precision": meta["test_precision"],
-        "test_recall": meta["test_recall"],
-        "test_f1": meta["test_f1"]
-    })
+    if experiment:
+        experiment.log_parameters(meta)
 
-    # Log a visual confusion matrix directly to Comet!
-    experiment.log_confusion_matrix(y_true=yte, y_predicted=preds)
-    experiment.set_name(note)
+        experiment.log_metrics({
+            "test_average_correct_podiums": meta["test_average_correct_podiums"],
+            "test_recall_at_3": meta["test_recall_at_3"],
+        })
 
-    experiment.log_model(f"f1-model-v{args.version}", str(model_path))
-    experiment.end()
+        experiment.set_name(note)
+
+        experiment.log_model(
+            f"f1-model-v{args.version}",
+            str(model_path)
+        )
+
+        experiment.end()
 
 print(f"Saved {out} | {note}")
 if args.promote:
