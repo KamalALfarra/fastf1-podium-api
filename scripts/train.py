@@ -15,12 +15,12 @@ from sklearn.metrics import classification_report, precision_score, recall_score
 
 # 1. Setup Recipes
 RECIPES = {
-    "1.0.0": ("RandomForest, 500 trees, tuned",
-              RandomForestClassifier(n_estimators=500, random_state=42,class_weight={False: 1, True: 20})),
-    "1.1.0": ("LogisticRegression with class_weight={False: 1, True: 20}, max_iter=600 and set threshold to 0.9",
-              LogisticRegression(max_iter=600, random_state=42,class_weight={False: 1, True: 20})),
-    "1.2.0": ("XGBoost with scale_pos_weight=6 and set threshold to 0.7 eval_metric = aucpr,n_estimators=600,max_depth=2",
-              XGBClassifier(n_estimators=600,learning_rate=0.05,max_depth=2, random_state=42,scale_pos_weight=6,eval_metric="aucpr")),
+    "1.0.0": ("Probabilistic RandomForest with class_weight={False: 1, True: 7}, max_iter=800",
+              RandomForestClassifier(n_estimators=800, random_state=42,class_weight={False: 1, True: 7})),
+    "1.1.0": ("Probabilistic LogisticRegression with class_weight={False: 1, True: 2}, max_iter=600",
+              LogisticRegression(max_iter=600, random_state=42,class_weight={False: 1, True: 2})),
+    "1.2.0": ("Probabilistic XGBoost with scale_pos_weight=8 eval_metric = aucpr,n_estimators=400,max_depth=2",
+              XGBClassifier(n_estimators=400,learning_rate=0.05,max_depth=2, random_state=42,scale_pos_weight=8,eval_metric="aucpr")),
 }
 
 # 2. Parse Arguments
@@ -46,8 +46,6 @@ except Exception as e:
 # 4. Data & Training
 ROOT = Path(__file__).resolve().parent.parent
 df = pd.read_csv(ROOT / "data" / "processed" / "final_features.csv")
-df["grid_position_missing"] = df["grid_position"].isna().astype(int)
-df["grid_position"] = df["grid_position"].fillna(24)
 
 note, estimator = RECIPES[args.version]
 y = df['got_podium']
@@ -106,16 +104,17 @@ podium_recall_at_3 = (
     results['predicted_podium'] & results['got_podium']
 ).sum() / results['got_podium'].sum()
 
-print("\n--- Top 3 Podium Prediction ---")
-print(f"Average correct podium drivers per race: {average_correct:.2f}")
-print(f"Podium Recall@3: {podium_recall_at_3:.2%}")
+# ============================================================
+# Top-3 Podium Evaluation
+# ============================================================
 
-# not using it for now
-#preds = probs >= 0.9
-# Print the classification report to your terminal
 # Create evaluation dataframe
-results = df.loc[Xte.index, ['season', 'round', 'driver_name', 'got_podium']].copy()
+results = df.loc[
+    Xte.index,
+    ['season', 'round', 'driver_name', 'got_podium']
+].copy()
 
+# Add predicted podium probability
 results['podium_probability'] = probs
 
 # Rank drivers within each race
@@ -128,24 +127,28 @@ results['rank'] = (
 # Top 3 drivers are our predicted podium
 results['predicted_podium'] = results['rank'] <= 3
 
-# Number of correct podium predictions
+# Count how many of our predicted top 3 actually podiumed
 correct_predictions = (
     results['predicted_podium'] & results['got_podium']
 ).sum()
 
-# Number of races in test set
-number_of_races = results.groupby(['season', 'round']).ngroups
+# Number of races in the test set
+number_of_races = (
+    results[['season', 'round']]
+    .drop_duplicates()
+    .shape[0]
+)
 
-# Average correct podium drivers per race
+# Average number of correct podium drivers per race
 average_correct = correct_predictions / number_of_races
 
-# Recall@3
-total_actual_podiums = results['got_podium'].sum()
-recall_at_3 = correct_predictions / total_actual_podiums
+# Since every complete F1 race has exactly 3 podium positions:
+podium_recall_at_3 = average_correct / 3
 
+# Print results ONCE
 print(f"\n--- Top 3 Podium Prediction for v{args.version} ---")
 print(f"Average correct podiums per race: {average_correct:.2f} / 3")
-print(f"Recall@3: {recall_at_3:.2%}")
+print(f"Podium Recall@3: {podium_recall_at_3:.2%}")
 
 # 5. Save Locally
 out = Path("models") / f"v{args.version}"
@@ -165,7 +168,7 @@ meta = {
     ),
 
     "test_recall_at_3": round(
-        float(recall_at_3), 4
+        float(podium_recall_at_3), 4
     ),
 
     "test_races": int(number_of_races),
