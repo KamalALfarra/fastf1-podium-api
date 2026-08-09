@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 RAW_FOLDER = ROOT / "data" / "raw"
 
 RAW_FOLDER.mkdir(parents=True, exist_ok=True)
-
+print(RAW_FOLDER)
 
 # ==========================
 # Helpers
@@ -192,6 +192,12 @@ from datetime import datetime
 
 # Assuming RAW_FOLDER is defined earlier in your script, e.g., RAW_FOLDER = Path("data")
 
+import time
+import requests
+import pandas as pd
+from pathlib import Path
+from datetime import datetime
+
 def fetch_ml_standings_data(start_year, end_year, filename="driver_ml_features.csv"):
     """
     Downloads driver standings per round alongside pre-race career features (age, experience, wins, podiums)
@@ -277,7 +283,8 @@ def fetch_ml_standings_data(start_year, end_year, filename="driver_ml_features.c
                         "round": rnd,
                         "is_win": 1 if pos == "1" else 0,
                         "is_podium": 1 if pos in ["1", "2", "3"] else 0,
-                        "grid": int(grid_pos) if grid_pos.isdigit() else 0
+                        "grid": int(grid_pos) if grid_pos.isdigit() else 0,
+                        "position": int(pos) if pos and str(pos).isdigit() else 20 # <--- ADDED: Save final position (default 20 for unclassified/DNF)
                     })
 
             total = int(data.get("MRData", {}).get("total", 0))
@@ -364,13 +371,21 @@ def fetch_ml_standings_data(start_year, end_year, filename="driver_ml_features.c
                 wins_before = 0
                 podiums_before = 0
                 grid_position = None
+                past_positions = [] # <--- ADDED: List to store past finishes
 
                 for hist in driver_history.get(d_id, []):
                     if hist["year"] < y or (hist["year"] == y and hist["round"] < rnd):
                         wins_before += hist["is_win"]
                         podiums_before += hist["is_podium"]
+                        past_positions.append(hist["position"]) # <--- ADDED: Collect all previous finishing positions
                     elif hist["year"] == y and hist["round"] == rnd:
                         grid_position = hist["grid"]
+
+                # <--- ADDED: Calculate average of the last 3 races (driver recent form)
+                driver_recent_form = None
+                if past_positions:
+                    last_3 = past_positions[-3:]
+                    driver_recent_form = round(sum(last_3) / len(last_3), 2)
 
                 ml_rows.append({
                     "season": y,
@@ -384,7 +399,8 @@ def fetch_ml_standings_data(start_year, end_year, filename="driver_ml_features.c
                     "age_at_race": age,
                     "years_of_experience": experience,
                     "career_wins_before_race": wins_before,
-                    "career_podiums_before_race": podiums_before
+                    "career_podiums_before_race": podiums_before,
+                    "driver_recent_form": driver_recent_form # <--- ADDED
                 })
 
     # --- Step 4: Save everything to a single CSV ---
@@ -424,6 +440,11 @@ def make_Final_table():
 
     # 6. Fill the NaN values with False for drivers who did not get a podium
     df_merged['got_podium'] = df_merged['got_podium'].fillna(False)
+    #clean some of the missing data
+    df_merged["grid_position_missing"] = df_merged["grid_position"].isna().astype(int)
+    df_merged["grid_position"] = df_merged["grid_position"].fillna(24)
+    df_merged["driver_recent_form_missing"] = df_merged["driver_recent_form"].isna().astype(int)
+    df_merged["driver_recent_form"] = df_merged["driver_recent_form"].fillna(24)
 
     # 7. Save the updated table to a new CSV file
     path = ROOT / "data" / "processed" / "final_features.csv"
