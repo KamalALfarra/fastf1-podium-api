@@ -1,0 +1,24 @@
+{
+  "model_version": "1.1.0",
+  "description": "Probabilistic LogisticRegression with class_weight={False: 1, True: 2}, max_iter=600",
+  "algorithm": "LogisticRegression",
+  "features": [
+    "season",
+    "round",
+    "constructor_championship_standing",
+    "championship_standing",
+    "championship_points",
+    "grid_position",
+    "age_at_race",
+    "years_of_experience",
+    "career_wins_before_race",
+    "career_podiums_before_race",
+    "driver_recent_form",
+    "grid_position_missing",
+    "driver_recent_form_missing"
+  ],
+  "test_average_correct_podiums": 1.7917,
+  "test_recall_at_3": 0.5972,
+  "test_races": 24,
+  "test_rows": 519
+}
